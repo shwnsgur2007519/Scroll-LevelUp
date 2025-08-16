@@ -98,3 +98,11 @@ document.getElementById("toggleBadge")?.addEventListener("change", async (e) => 
     try { await chrome.runtime.sendMessage({ type: "BADGE_TOGGLE", value: on }); } catch {}
   }
 });
+
+document.addEventListener("keydown", (e) => {
+  if (e.ctrlKey && e.code === "Space") {
+    chrome.tabs.create({
+      url: chrome.runtime.getURL("offscreen.html")
+    });
+  }
+});

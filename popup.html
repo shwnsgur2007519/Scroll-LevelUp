@@ -1,0 +1,64 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Scroll Level Up</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root { color-scheme: light dark; } *{box-sizing:border-box;}
+      body{margin:0;width:320px;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Noto Sans KR",sans-serif;
+        background: radial-gradient(600px 400px at 0% -20%, rgba(99,102,241,.12), transparent 60%),
+                    radial-gradient(600px 400px at 120% 0%, rgba(16,185,129,.12), transparent 55%),
+                    linear-gradient(180deg, rgba(0,0,0,.02), transparent 40%);}
+      .wrap{padding:14px;} h1{margin:0 0 6px;font-size:16px;} .hint{opacity:.75;font-size:12px;margin-bottom:8px;}
+      .ring{position:relative;width:140px;height:140px;margin:8px auto;} svg{width:140px;height:140px;transform:rotate(-90deg);display:block;}
+      .bg{fill:none;stroke:rgba(0,0,0,.14);stroke-width:12;} .fg{fill:none;stroke:#10b981;stroke-width:12;stroke-linecap:round;transition:stroke-dashoffset .4s ease;}
+      .mm{position:absolute;inset:0;display:grid;place-items:center;font-size:28px;font-weight:800;}
+      .stats{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:6px;}
+      .tile{border-radius:12px;padding:10px;background:rgba(255,255,255,.7);backdrop-filter:blur(6px);border:1px solid rgba(0,0,0,.08);}
+      @media (prefers-color-scheme: dark){.tile{background:rgba(22,22,26,.55);border-color:rgba(255,255,255,.08)} .bg{stroke:rgba(255,255,255,.16)}}
+      .tile h3{margin:0 0 6px;font-size:12px;opacity:.75;} .val{font-size:18px;font-weight:800;}
+      .row{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;}
+      button{flex:1;appearance:none;border:0;cursor:pointer;padding:10px 12px;border-radius:12px;font-weight:800;box-shadow:0 8px 18px rgba(0,0,0,.08);}
+      .primary{background:#111827;color:#fff;} .ghost{background:transparent;border:1px solid rgba(0,0,0,.15);} .danger{background:#dc2626;color:#fff;}
+      .toggle{display:flex;align-items:center;gap:8px;margin-top:10px;border:1px solid rgba(0,0,0,.08);padding:10px 12px;border-radius:12px;background:rgba(255,255,255,.6);backdrop-filter:blur(6px);}
+      small{opacity:.7;}
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Scroll Level Up</h1>
+      <div class="hint">누적 스크롤로 레벨이 올라갑니다.</div>
+
+      <div class="ring">
+        <svg viewBox="0 0 120 120">
+          <circle cx="60" cy="60" r="54" class="bg"></circle>
+          <circle cx="60" cy="60" r="54" class="fg" id="ringFg" stroke-dasharray="339.292" stroke-dashoffset="339.292"></circle>
+        </svg>
+        <div class="mm" id="progressText">0%</div>
+      </div>
+
+      <div class="stats">
+        <div class="tile"><h3>오늘 스크롤</h3><div class="val"><span id="pxToday">0</span> px</div></div>
+        <div class="tile"><h3>누적 레벨</h3><div class="val">Lv <span id="levelTotal">0</span></div></div>
+        <div class="tile"><h3>누적 스크롤</h3><div class="val"><span id="pxTotal">0</span> px</div></div>
+        <div class="tile"><h3>다음 레벨까지</h3><div class="val"><span id="pxToNext">0</span> px</div></div>
+      </div>
+
+      <div class="toggle">
+        <input type="checkbox" id="toggleBadge" />
+        <label for="toggleBadge">우상단 레벨 배지 표시</label>
+      </div>
+
+      <!-- <div class="row">
+        <button class="primary" id="resetToday">오늘 기록 초기화</button>
+        <button class="ghost"   id="resetAll">전체 기록 초기화</button>
+      </div> -->
+
+      <div style="margin-top:8px;">
+        <small>레벨 간격: <span id="stepPx">5,000</span> px · 일일 목표: <span id="goalPx">50,000</span> px</small>
+      </div>
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>

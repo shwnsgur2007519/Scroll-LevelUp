@@ -1,45 +1,36 @@
 // MV3 Service Worker (module)
 
+let creatingOffscreen;
+
 async function ensureOffscreen() {
-  if (await chrome.offscreen.hasDocument?.()) return;
-  await chrome.offscreen.createDocument({
-    url: "offscreen.html",
-    reasons: ["IFRAME_SCRIPTING"],
-    justification: "Use extension-scoped localStorage as fast, consistent store."
+  const url = chrome.runtime.getURL("offscreen.html");
+  const contexts = await chrome.runtime.getContexts({
+    contextTypes: ["OFFSCREEN_DOCUMENT"],
+    documentUrls: [url]
   });
+  if (contexts.length) return;
+  if (!creatingOffscreen) {
+    creatingOffscreen = chrome.offscreen.createDocument({
+      url: "offscreen.html",
+      reasons: ["LOCAL_STORAGE"],
+      justification: "Store scroll progress in extension localStorage."
+    }).finally(() => { creatingOffscreen = null; });
+  }
+  await creatingOffscreen;
 }
 
-chrome.runtime.onStartup.addListener(ensureOffscreen);
-chrome.runtime.onInstalled.addListener(ensureOffscreen);
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  (async () => {
-    if (msg?.type === "SCROLL_DELTA" && sender.tab?.id && sender.frameId > 0) {
-      await chrome.tabs.sendMessage(sender.tab.id, msg, { frameId: 0 });
-      sendResponse({ ok: true });
-      return;
-    }
+  if (msg?.type === "SCROLL_DELTA" && sender.tab?.id && sender.frameId > 0) {
+    chrome.tabs.sendMessage(sender.tab.id, msg, { frameId: 0 })
+      .then(() => sendResponse({ ok: true }), error => sendResponse({ error: String(error) }));
+    return true;
+  }
 
-    await ensureOffscreen();
+  const types = { STORE_GET: "LS_GET", STORE_SET: "LS_SET", STORE_ADD: "LS_ADD" };
+  if (!types[msg?.type]) return;
 
-    // ▼ 추가: 배지 토글 브로드캐스트
-    if (msg?.type === "BADGE_TOGGLE") {
-      const tabs = await chrome.tabs.query({});
-      for (const t of tabs) {
-        if (!t.id) continue;
-        try {
-          await chrome.tabs.sendMessage(t.id, { type: "BADGE_TOGGLE", value: !!msg.value });
-        } catch (_) { /* 탭에 컨텐츠 없을 수도 있음 */ }
-      }
-      sendResponse({ ok: true });
-      return;
-    }
-
-    // (나머지 LS_GET / LS_SET / LS_MERGE 분기는 기존 그대로)
-    if (msg?.type === "LS_GET" || msg?.type === "LS_SET" || msg?.type === "LS_MERGE") {
-      chrome.runtime.sendMessage(msg, sendResponse);
-      return;
-    }
-    sendResponse({ ok: true });
-  })();
+  ensureOffscreen()
+    .then(() => chrome.runtime.sendMessage({ ...msg, type: types[msg.type] }))
+    .then(sendResponse, error => sendResponse({ error: String(error) }));
   return true;
 });

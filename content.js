@@ -1,69 +1,33 @@
 // ===== 설정 =====
 const BASE_STEP_PX = 5000;    // 레벨1 요구치
 const INCREMENT    = 2500;    // 레벨마다 추가 요구 픽셀(선형)
-const DAILY_GOAL_PX = 50000;  // 오늘 목표(팝업 링)
-const SAVE_DEBOUNCE_MS = 400;
-const BIG_JUMP_SAVE_THRESHOLD = 1500;
+const SAVE_INTERVAL_MS = 100;
 
-// ===== Runtime/Queue & 캐시 =====
-function hasRuntime() {
-  return typeof chrome !== "undefined"
-    && chrome.runtime && chrome.runtime.id
-    && typeof chrome.runtime.sendMessage === "function";
+// ===== Store helpers =====
+let contextInvalidated = false;
+
+function extensionActive() {
+  return !contextInvalidated && !!chrome.runtime?.id;
 }
-const PENDING_KEY = "slu_pending";
-const CACHE_KEY   = "slu_cache";
-function readJSON(key){ try{return JSON.parse(localStorage.getItem(key)||"{}");}catch{return{};} }
-function writeJSON(key,obj){ localStorage.setItem(key,JSON.stringify(obj||{})); }
-function merge(o,p){ return { ...(o||{}), ...(p||{}) }; }
-function pick(all,keys){ if(!keys) return all; const out={}; for(const k of keys) out[k]=all[k]; return out; }
 
-// ===== Store helpers : 항상 오프스크린 localStorage 사용(없으면 대기열) =====
+function sendToRuntime(message) {
+  return Promise.resolve()
+    .then(() => extensionActive() ? chrome.runtime.sendMessage(message) : null)
+    .catch(error => {
+      if (String(error).includes("Extension context invalidated")) {
+        contextInvalidated = true;
+        document.getElementById("sluBadge")?.remove();
+        return null;
+      }
+      throw error;
+    });
+}
+
 async function getStore(keys) {
-  if (hasRuntime()) {
-    const pending = readJSON(PENDING_KEY);
-    if (Object.keys(pending).length) {
-      await chrome.runtime.sendMessage({ type:"LS_SET", payload: pending });
-      writeJSON(PENDING_KEY, {});
-    }
-    const fresh = await chrome.runtime.sendMessage({ type:"LS_GET", keys });
-    const cache = readJSON(CACHE_KEY);
-    writeJSON(CACHE_KEY, merge(cache, fresh));
-    return fresh;
-  }
-  const cache = readJSON(CACHE_KEY);
-  const pending = readJSON(PENDING_KEY);
-  return pick(merge(cache, pending), keys);
-}
-async function setStore(payload) {
-  if (hasRuntime()) {
-    const cache = readJSON(CACHE_KEY);
-    writeJSON(CACHE_KEY, merge(cache, payload));
-    return await chrome.runtime.sendMessage({ type:"LS_SET", payload });
-  }
-  const pending = readJSON(PENDING_KEY);
-  writeJSON(PENDING_KEY, merge(pending, payload));
-  const cache = readJSON(CACHE_KEY);
-  writeJSON(CACHE_KEY, merge(cache, payload));
-  return { ok:true, offline:true };
-}
-async function mergeScrollHistory(dayKey, record) {
-  if (hasRuntime()) {
-    const cache = readJSON(CACHE_KEY);
-    const map = cache.scrollHistory || {};
-    map[dayKey] = { ...(map[dayKey]||{}), ...record };
-    writeJSON(CACHE_KEY, { ...cache, scrollHistory: map });
-    return await chrome.runtime.sendMessage({ type:"LS_MERGE", path:"scrollHistory", key:dayKey, value:record });
-  }
-  const pending = readJSON(PENDING_KEY);
-  const map = pending.scrollHistory || {};
-  map[dayKey] = { ...(map[dayKey]||{}), ...record };
-  pending.scrollHistory = map; writeJSON(PENDING_KEY, pending);
-  const cache = readJSON(CACHE_KEY);
-  const map2 = cache.scrollHistory || {};
-  map2[dayKey] = { ...(map2[dayKey]||{}), ...record };
-  writeJSON(CACHE_KEY, { ...cache, scrollHistory: map2 });
-  return { ok:true, offline:true };
+  const result = await sendToRuntime({ type:"STORE_GET", keys });
+  if (!result) return null;
+  if (result?.error) throw new Error(result.error);
+  return result;
 }
 
 // ===== 유틸/난이도 =====
@@ -85,8 +49,9 @@ let today = todayKey();
 let pxToday = 0;
 let totalPx = 0;
 let totalLevel = 0;
-let lastSavedPx = 0;
 let saveTimer = null;
+const pendingScroll = [];
+let flushing = null;
 let badgeEnabled = true;
 let suppressNextLevelUp = false; // 병합으로 레벨이 변한 직후 팝업 억제
 
@@ -105,7 +70,7 @@ function ensureBadge(){
     <div class="slu-badge__bar"><div class="slu-badge__fill" id="${FILL_ID}" style="width:0%"></div></div>`;
   document.documentElement.appendChild(badgeEl);
 }
-function updateBadge(){
+function updateBadge(animate = true){
   if (!badgeEnabled) {
     const ex = document.getElementById(BADGE_ID);
     if (ex) ex.remove();
@@ -117,7 +82,12 @@ function updateBadge(){
   if(!elLevel||!elFill) return;
   const cur=progressInCurrentLevel(totalPx);
   elLevel.textContent=`Lv ${cur.level}`;
+  if (!animate) elFill.style.transition = "none";
   elFill.style.width=`${Math.round(cur.pctInLevel*100)}%`;
+  if (!animate) {
+    void elFill.offsetWidth;
+    elFill.style.transition = "";
+  }
 }
 function showLevelUpAnimation(newLevel){
   const old=document.getElementById("sluOverlay"); if(old) old.remove();
@@ -128,70 +98,97 @@ function showLevelUpAnimation(newLevel){
 }
 
 // ===== 로드/세이브 =====
-async function readAndMerge(){
-  const key=todayKey();
-  const remote=await getStore(["scrollHistory","totalPx"]);
-  const map=remote.scrollHistory||{};
-  const rec=map[key]||{};
-  const mergedPxToday=Math.max(rec.px||0, pxToday);
-  const mergedTotalPx=Math.max(remote.totalPx||0, totalPx);
-  map[key]={ ...rec, px: mergedPxToday, goal: DAILY_GOAL_PX, step: BASE_STEP_PX, updatedAt: Date.now() };
-  return { map, mergedPxToday, mergedTotalPx, key };
+function pendingTotal(day) {
+  return pendingScroll.reduce((sum, item) => sum + (day && item.day !== day ? 0 : item.px), 0);
 }
-async function saveStateDebounced(){ if(saveTimer) clearTimeout(saveTimer); saveTimer=setTimeout(saveStateNow, SAVE_DEBOUNCE_MS); }
 
-let _saving=false,_saveAgain=false;
-async function saveStateNow(){
-  if(_saving){ _saveAgain=true; return; }
-  _saving=true;
-  try{
-    const { map, mergedPxToday, mergedTotalPx } = await readAndMerge();
-    await setStore({ scrollHistory: map, totalPx: mergedTotalPx });
-    pxToday=mergedPxToday; totalPx=mergedTotalPx;
+function flushScroll() {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = null;
+  if (!extensionActive()) return Promise.resolve();
+  if (flushing) return flushing;
+  if (!pendingScroll.length) return Promise.resolve();
 
-    const mergedLevel=progressInCurrentLevel(totalPx).level;
-    if(mergedLevel>totalLevel){
-      totalLevel=mergedLevel;
-      suppressNextLevelUp=true; // 병합발 상승은 팝업 억제
+  flushing = (async () => {
+    while (pendingScroll.length) {
+      const item = { ...pendingScroll[0] };
+      const result = await sendToRuntime({
+        type: "STORE_ADD", dayKey: item.day, px: item.px
+      });
+      if (!result) return;
+      if (result?.error) throw new Error(result.error);
+      pendingScroll[0].px -= item.px;
+      if (!pendingScroll[0].px) pendingScroll.shift();
+      totalPx = result.totalPx + pendingTotal();
+      if (item.day === today) pxToday = result.pxToday + pendingTotal(today);
+      const level = progressInCurrentLevel(totalPx).level;
+      if (level > totalLevel) suppressNextLevelUp = true;
+      totalLevel = level;
       updateBadge();
     }
-    lastSavedPx=pxToday;
-  }catch(e){ console.debug("saveStateNow() deferred/failed:", e); }
-  finally{ _saving=false; if(_saveAgain){ _saveAgain=false; saveStateNow(); } }
+  })().finally(() => { flushing = null; });
+  return flushing;
+}
+
+function scheduleSave() {
+  if (!saveTimer) saveTimer = setTimeout(flushScroll, SAVE_INTERVAL_MS);
+}
+
+function sendFrameScroll(direct = false) {
+  if (frameSendTimer) clearTimeout(frameSendTimer);
+  frameSendTimer = null;
+  if (!framePendingPx) return;
+  const px = framePendingPx;
+  framePendingPx = 0;
+  if (!extensionActive()) return;
+  if (direct) {
+    sendToRuntime({ type:"STORE_ADD", dayKey:todayKey(), px });
+  } else {
+    sendToRuntime({ type:"SCROLL_DELTA", dy:px });
+  }
 }
 
 async function loadState(){
   const key=todayKey();
   const obj=await getStore(["scrollHistory","totalPx","badgeEnabled"]);
+  if (!obj) return;
   const map=obj.scrollHistory||{}; const rec=map[key]||{px:0};
-  pxToday=rec.px||0; totalPx=obj.totalPx||0; totalLevel=progressInCurrentLevel(totalPx).level;
+  pxToday=(rec.px||0)+pendingTotal(key);
+  totalPx=(obj.totalPx||0)+pendingTotal();
+  totalLevel=progressInCurrentLevel(totalPx).level;
   today=key; badgeEnabled=obj.badgeEnabled!==false;
-  updateBadge();
+  updateBadge(false);
 }
 
 // ===== 이벤트 =====
 function recordScroll(dy){
   if (!dy) return;
-  if (!IS_TOP_FRAME) {
-    framePendingPx+=dy;
-    if (!frameSendTimer) {
-      frameSendTimer=setTimeout(()=>{
-        chrome.runtime.sendMessage({ type:"SCROLL_DELTA", dy:framePendingPx });
-        framePendingPx=0;
-        frameSendTimer=null;
-      }, 100);
-    }
+  if (!extensionActive()) {
+    document.getElementById(BADGE_ID)?.remove();
     return;
   }
+  if (!IS_TOP_FRAME) {
+    framePendingPx+=dy;
+    if (!frameSendTimer) frameSendTimer=setTimeout(sendFrameScroll, SAVE_INTERVAL_MS);
+    return;
+  }
+  const key = todayKey();
+  if (key !== today) {
+    today = key;
+    pxToday = pendingTotal(key);
+    loadState();
+  }
   pxToday+=dy; totalPx+=dy;
+  const last = pendingScroll[pendingScroll.length-1];
+  if (last?.day === key) last.px += dy;
+  else pendingScroll.push({ day:key, px:dy });
   const cur=progressInCurrentLevel(totalPx);
   if(cur.level>totalLevel){
     if(suppressNextLevelUp){ totalLevel=cur.level; suppressNextLevelUp=false; }
     else { totalLevel=cur.level; showLevelUpAnimation(totalLevel); }
   }
   updateBadge();
-  if(dy>=BIG_JUMP_SAVE_THRESHOLD) saveStateNow();
-  else saveStateDebounced();
+  scheduleSave();
 }
 
 function onScroll(event){
@@ -228,12 +225,16 @@ function rememberScrollPositions(event){
   }
 }
 
-function onVisibilityChange(){
-  if(!document.hidden){
-    const key=todayKey();
-    if(key!==today) loadState();
+async function onVisibilityChange(){
+  if (!extensionActive()) {
+    document.getElementById(BADGE_ID)?.remove();
+    return;
+  }
+  if (document.hidden) {
+    await flushScroll();
   } else {
-    saveStateNow(); // 가려질 때 즉시 저장
+    await flushScroll();
+    await loadState();
   }
 }
 
@@ -241,16 +242,8 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage)
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg?.type === "SCROLL_DELTA" && IS_TOP_FRAME && Number.isFinite(msg.dy) && msg.dy>0) {
       recordScroll(msg.dy);
+      if (document.hidden) flushScroll();
       return;
-    }
-    if (msg && msg.type === "BADGE_TOGGLE" && IS_TOP_FRAME) {
-      badgeEnabled = !!msg.value;
-      if (!badgeEnabled) {
-        const ex = document.getElementById(BADGE_ID);
-        if (ex) ex.remove();
-      } else {
-        updateBadge();
-      }
     }
   });
 }
@@ -261,6 +254,10 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage)
   }
   document.addEventListener("scroll", onScroll, { capture:true, passive:true });
   if (!IS_TOP_FRAME) {
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) sendFrameScroll(true);
+    });
+    window.addEventListener("pagehide", () => sendFrameScroll(true), { capture:true });
     return;
   }
   if (!document.documentElement) {
@@ -271,9 +268,11 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage)
   updateBadge();
 
   document.addEventListener("visibilitychange", onVisibilityChange);
-  window.addEventListener("pagehide", ()=>{ saveStateNow(); }, { capture:true });
-  window.addEventListener("beforeunload", ()=>{ saveStateNow(); }, { capture:true });
+  window.addEventListener("blur", flushScroll);
+  window.addEventListener("focus", onVisibilityChange);
+  window.addEventListener("pagehide", flushScroll, { capture:true });
+  window.addEventListener("beforeunload", flushScroll, { capture:true });
 
   setInterval(()=>{ pagePosition={ x:window.scrollX||0, y:window.scrollY||0 }; }, 1500); // SPA 보정
-  setInterval(()=>{ saveStateNow(); }, 5000);                  // 주기 백업
+  setInterval(flushScroll, 5000);                              // 주기 백업
 })();

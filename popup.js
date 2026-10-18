@@ -3,36 +3,15 @@ const DEFAULT_GOAL = 50000;
 const BASE_STEP_PX = 5000;
 const INCREMENT    = 2500;
 
-// ===== Runtime/Queue & 캐시 (content와 동일) =====
-function hasRuntime(){ return typeof chrome!=="undefined" && chrome.runtime && chrome.runtime.id && typeof chrome.runtime.sendMessage==="function"; }
-const PENDING_KEY="slu_pending", CACHE_KEY="slu_cache";
-function readJSON(k){ try{return JSON.parse(localStorage.getItem(k)||"{}");}catch{return{};} }
-function writeJSON(k,o){ localStorage.setItem(k,JSON.stringify(o||{})); }
-function merge(o,p){ return { ...(o||{}), ...(p||{}) }; }
-function pick(all,keys){ if(!keys) return all; const out={}; for(const k of keys) out[k]=all[k]; return out; }
-
 async function getStore(keys){
-  if(hasRuntime()){
-    const pending=readJSON(PENDING_KEY);
-    if(Object.keys(pending).length){
-      await chrome.runtime.sendMessage({type:"LS_SET",payload:pending});
-      writeJSON(PENDING_KEY,{});
-    }
-    const fresh=await chrome.runtime.sendMessage({type:"LS_GET",keys});
-    const cache=readJSON(CACHE_KEY); writeJSON(CACHE_KEY, merge(cache,fresh));
-    return fresh;
-  }
-  const cache=readJSON(CACHE_KEY), pending=readJSON(PENDING_KEY);
-  return pick(merge(cache,pending), keys);
+  const result=await chrome.runtime.sendMessage({type:"STORE_GET",keys});
+  if(result?.error) throw new Error(result.error);
+  return result;
 }
 async function setStore(payload){
-  if(hasRuntime()){
-    const cache=readJSON(CACHE_KEY); writeJSON(CACHE_KEY, merge(cache,payload));
-    return await chrome.runtime.sendMessage({type:"LS_SET",payload});
-  }
-  const pending=readJSON(PENDING_KEY); writeJSON(PENDING_KEY, merge(pending,payload));
-  const cache=readJSON(CACHE_KEY); writeJSON(CACHE_KEY, merge(cache,payload));
-  return {ok:true,offline:true};
+  const result=await chrome.runtime.sendMessage({type:"STORE_SET",payload});
+  if(result?.error) throw new Error(result.error);
+  return result;
 }
 
 // ===== 난이도 유틸 =====
@@ -80,23 +59,12 @@ document.getElementById("resetToday")?.addEventListener("click", async ()=>{
   await setStore({ scrollHistory: map }); await render();
 });
 
-// 스토리지 변경 시 즉시 반영(가능한 경우)
-if (typeof chrome!=="undefined" && chrome.storage && chrome.storage.onChanged){
-  chrome.storage.onChanged.addListener((changes, area)=>{
-    if(area==="local" && (changes.scrollHistory || changes.totalPx || changes.badgeEnabled)) render();
-  });
-}
-
 render();
+setInterval(render, 1000);
 
 document.getElementById("toggleBadge")?.addEventListener("change", async (e) => {
   const on = !!e.target.checked;
   await setStore({ badgeEnabled: on });
-
-  // 컨텐츠 스크립트가 즉시 반영할 수 있게 브로드캐스트
-  if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-    try { await chrome.runtime.sendMessage({ type: "BADGE_TOGGLE", value: on }); } catch {}
-  }
 });
 
 document.addEventListener("keydown", (e) => {

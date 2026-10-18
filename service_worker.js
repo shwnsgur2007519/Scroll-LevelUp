@@ -11,8 +11,14 @@ async function ensureOffscreen() {
 
 chrome.runtime.onStartup.addListener(ensureOffscreen);
 chrome.runtime.onInstalled.addListener(ensureOffscreen);
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
+    if (msg?.type === "SCROLL_DELTA" && sender.tab?.id && sender.frameId > 0) {
+      await chrome.tabs.sendMessage(sender.tab.id, msg, { frameId: 0 });
+      sendResponse({ ok: true });
+      return;
+    }
+
     await ensureOffscreen();
 
     // ▼ 추가: 배지 토글 브로드캐스트

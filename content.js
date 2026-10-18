@@ -75,7 +75,12 @@ function progressInCurrentLevel(T){ const L=levelFromTotalPx(T); const base=cumF
 const clamp=(n,min,max)=>Math.max(min,Math.min(max,n));
 
 // ===== 상태 =====
-let lastY = window.scrollY || 0;
+const IS_TOP_FRAME = window === window.top;
+let pagePosition = { x:window.scrollX||0, y:window.scrollY||0 };
+const elementScrollPositions = new WeakMap();
+const observedShadowRoots = new WeakSet();
+let framePendingPx = 0;
+let frameSendTimer = null;
 let today = todayKey();
 let pxToday = 0;
 let totalPx = 0;
@@ -165,22 +170,62 @@ async function loadState(){
 }
 
 // ===== 이벤트 =====
-function onScroll(){
-  const y=window.scrollY||0;
-  if(Math.abs(y-lastY)>window.innerHeight*2){ lastY=y; return; }
-  const dy=Math.abs(y-lastY);
-  if(dy>0){
-    pxToday+=dy; totalPx+=dy;
-    const cur=progressInCurrentLevel(totalPx);
-    if(cur.level>totalLevel){
-      if(suppressNextLevelUp){ totalLevel=cur.level; suppressNextLevelUp=false; }
-      else { totalLevel=cur.level; showLevelUpAnimation(totalLevel); }
+function recordScroll(dy){
+  if (!dy) return;
+  if (!IS_TOP_FRAME) {
+    framePendingPx+=dy;
+    if (!frameSendTimer) {
+      frameSendTimer=setTimeout(()=>{
+        chrome.runtime.sendMessage({ type:"SCROLL_DELTA", dy:framePendingPx });
+        framePendingPx=0;
+        frameSendTimer=null;
+      }, 100);
     }
-    updateBadge();
-    if(dy>=BIG_JUMP_SAVE_THRESHOLD) saveStateNow();
-    else if(Math.abs(pxToday-lastSavedPx)>200) saveStateDebounced();
+    return;
   }
-  lastY=y;
+  pxToday+=dy; totalPx+=dy;
+  const cur=progressInCurrentLevel(totalPx);
+  if(cur.level>totalLevel){
+    if(suppressNextLevelUp){ totalLevel=cur.level; suppressNextLevelUp=false; }
+    else { totalLevel=cur.level; showLevelUpAnimation(totalLevel); }
+  }
+  updateBadge();
+  if(dy>=BIG_JUMP_SAVE_THRESHOLD) saveStateNow();
+  else saveStateDebounced();
+}
+
+function onScroll(event){
+  const target=event.target;
+  const isPage=target===document || target===window || target===document.documentElement;
+  const position=isPage
+    ? { x:window.scrollX||0, y:window.scrollY||0 }
+    : { x:target.scrollLeft, y:target.scrollTop };
+  const previous=isPage ? pagePosition : elementScrollPositions.get(target) ?? position;
+  if(isPage) pagePosition=position;
+  else elementScrollPositions.set(target,position);
+  recordScroll(Math.abs(position.x-previous.x)+Math.abs(position.y-previous.y));
+}
+
+function rememberScrollPositions(event){
+  const targets=[];
+  for (const target of event.composedPath()) {
+    if (target instanceof Element && target!==document.documentElement) {
+      if (!elementScrollPositions.has(target)) {
+        elementScrollPositions.set(target,{ x:target.scrollLeft, y:target.scrollTop });
+      }
+      targets.push(target);
+    }
+    if (target instanceof ShadowRoot && !observedShadowRoots.has(target)) {
+      target.addEventListener("scroll", onScroll, { capture:true, passive:true });
+      observedShadowRoots.add(target);
+    }
+  }
+  if (event.type==="wheel" || event.type==="touchmove") {
+    requestAnimationFrame(()=>{
+      for (const target of targets) onScroll({ target });
+      onScroll({ target:document });
+    });
+  }
 }
 
 function onVisibilityChange(){
@@ -194,7 +239,11 @@ function onVisibilityChange(){
 
 if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
   chrome.runtime.onMessage.addListener((msg) => {
-    if (msg && msg.type === "BADGE_TOGGLE") {
+    if (msg?.type === "SCROLL_DELTA" && IS_TOP_FRAME && Number.isFinite(msg.dy) && msg.dy>0) {
+      recordScroll(msg.dy);
+      return;
+    }
+    if (msg && msg.type === "BADGE_TOGGLE" && IS_TOP_FRAME) {
       badgeEnabled = !!msg.value;
       if (!badgeEnabled) {
         const ex = document.getElementById(BADGE_ID);
@@ -207,16 +256,24 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage)
 }
 // ===== 초기화 =====
 (async function init(){
-  ensureBadge();              // 문서 시작 즉시 뱃지 뼈대 노출
+  for (const type of ["wheel","pointerdown","touchstart","touchmove","keydown"]) {
+    document.addEventListener(type, rememberScrollPositions, { capture:true, passive:true });
+  }
+  document.addEventListener("scroll", onScroll, { capture:true, passive:true });
+  if (!IS_TOP_FRAME) {
+    return;
+  }
+  if (!document.documentElement) {
+    await new Promise(resolve=>document.addEventListener("DOMContentLoaded", resolve, { once:true }));
+  }
+  ensureBadge();              // 문서 루트가 준비되면 배지 표시
   await loadState();          // 최신값 로드
   updateBadge();
 
-  lastY = window.scrollY || 0;
-  window.addEventListener("scroll", onScroll, { passive:true });
   document.addEventListener("visibilitychange", onVisibilityChange);
   window.addEventListener("pagehide", ()=>{ saveStateNow(); }, { capture:true });
   window.addEventListener("beforeunload", ()=>{ saveStateNow(); }, { capture:true });
 
-  setInterval(()=>{ lastY = window.scrollY || lastY; }, 1500); // SPA 보정
+  setInterval(()=>{ pagePosition={ x:window.scrollX||0, y:window.scrollY||0 }; }, 1500); // SPA 보정
   setInterval(()=>{ saveStateNow(); }, 5000);                  // 주기 백업
 })();
